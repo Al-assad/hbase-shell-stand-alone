@@ -1,0 +1,210 @@
+#! /usr/bin/env bash
+# just for hbase client - yulinying 
+
+bin=`dirname "$0"`
+bin=`cd "$bin">/dev/null; pwd`
+
+# This will set HBASE_HOME, etc.
+. "$bin"/hbase-config.sh
+
+cygwin=false
+case "`uname`" in
+CYGWIN*) cygwin=true;;
+esac
+
+# Detect if we are in hbase sources dir
+in_dev_env=false
+
+read -d '' options_string << EOF
+Options:
+  --config DIR     Configuration direction to use. Default: ./conf
+  --hosts HOSTS    Override the list in 'regionservers' file
+  --auth-as-server Authenticate to ZooKeeper using servers configuration
+EOF
+# if no args specified, show usage
+if [ $# = 0 ]; then
+  echo "Usage: hbase [<options>] <command> [<args>]"
+  echo "$options_string"
+  echo ""
+  echo "Commands:"
+  echo "Some commands take arguments. Pass no args or -h for usage."
+  echo "  shell           Run the HBase shell"
+  exit 1
+fi
+
+# get arguments
+COMMAND=$1
+shift
+
+JAVA=$JAVA_HOME/bin/java
+
+# override default settings for this command, if applicable
+if [ -f "$HBASE_HOME/conf/hbase-env-$COMMAND.sh" ]; then
+  . "$HBASE_HOME/conf/hbase-env-$COMMAND.sh"
+fi
+
+add_size_suffix() {
+    # add an 'm' suffix if the argument is missing one, otherwise use whats there
+    local val="$1"
+    local lastchar=${val: -1}
+    if [[ "mMgG" == *$lastchar* ]]; then
+        echo $val
+    else
+        echo ${val}m
+    fi
+}
+
+if [[ -n "$HBASE_HEAPSIZE" ]]; then
+    JAVA_HEAP_MAX="-Xmx$(add_size_suffix $HBASE_HEAPSIZE)"
+fi
+
+if [[ -n "$HBASE_OFFHEAPSIZE" ]]; then
+    JAVA_OFFHEAP_MAX="-XX:MaxDirectMemorySize=$(add_size_suffix $HBASE_OFFHEAPSIZE)"
+fi
+
+# so that filenames w/ spaces are handled correctly in loops below
+ORIG_IFS=$IFS
+IFS=
+
+# CLASSPATH initially contains $HBASE_CONF_DIR
+CLASSPATH="${HBASE_CONF_DIR}"
+CLASSPATH=${CLASSPATH}:$JAVA_HOME/lib/tools.jar
+
+add_to_cp_if_exists() {
+  if [ -d "$@" ]; then
+    CLASSPATH=${CLASSPATH}:"$@"
+  fi
+}
+
+# For releases, add hbase to CLASSPATH
+#add the hbase jars for each module
+for f in $HBASE_HOME/hbase-jars/hbase*.jar; do
+	if [[ $f = *sources.jar ]]
+  then
+    : # Skip sources.jar
+  elif [ -f $f ]
+  then
+    CLASSPATH=${CLASSPATH}:$f;
+  fi
+done
+
+# Add libs to CLASSPATH
+for f in $HBASE_HOME/lib/*.jar; do
+  CLASSPATH=${CLASSPATH}:$f;
+done
+
+# default log directory & file
+if [ "$HBASE_LOG_DIR" = "" ]; then
+  HBASE_LOG_DIR="$HBASE_HOME/logs"
+fi
+if [ "$HBASE_LOGFILE" = "" ]; then
+  HBASE_LOGFILE='hbase.log'
+fi
+
+function append_path() {
+  if [ -z "$1" ]; then
+    echo $2
+  else
+    echo $1:$2
+  fi
+}
+
+JAVA_PLATFORM=""
+
+# if HBASE_LIBRARY_PATH is defined lets use it as first or second option
+if [ "$HBASE_LIBRARY_PATH" != "" ]; then
+  JAVA_LIBRARY_PATH=$(append_path "$JAVA_LIBRARY_PATH" "$HBASE_LIBRARY_PATH")
+fi
+
+# cygwin path translation
+if $cygwin; then
+  CLASSPATH=`cygpath -p -w "$CLASSPATH"`
+  HBASE_HOME=`cygpath -d "$HBASE_HOME"`
+  HBASE_LOG_DIR=`cygpath -d "$HBASE_LOG_DIR"`
+fi
+
+# cygwin path translation
+if $cygwin; then
+  JAVA_LIBRARY_PATH=`cygpath -p "$JAVA_LIBRARY_PATH"`
+fi
+
+# restore ordinary behaviour
+unset IFS
+
+HBASE_OPTS="$HBASE_OPTS $CLIENT_GC_OPTS"
+
+# for jruby
+# (1) for the commands which need jruby (see jruby_cmds defined below)
+#     A. when JRUBY_HOME is specified explicitly, eg. export JRUBY_HOME=/usr/local/share/jruby
+#        CLASSPATH and HBASE_OPTS are updated according to JRUBY_HOME specified
+#     B. when JRUBY_HOME is not specified explicitly
+#        add jruby packaged with HBase to CLASSPATH
+# (2) for other commands, do nothing
+
+# check if the commmand needs jruby
+declare -a jruby_cmds=("shell" "org.jruby.Main")
+for cmd in "${jruby_cmds[@]}"; do
+  if [[ $cmd == "$COMMAND" ]]; then
+    jruby_needed=true
+    break
+  fi
+done
+
+# the command needs jruby
+if [[ $jruby_needed ]]; then
+  if [ "$JRUBY_HOME" != "" ]; then  # JRUBY_HOME is specified explicitly, eg. export JRUBY_HOME=/usr/local/share/jruby
+    # add jruby.jar into CLASSPATH
+    CLASSPATH="$JRUBY_HOME/lib/jruby.jar:$CLASSPATH"
+
+    # add jruby to HBASE_OPTS
+    HBASE_OPTS="$HBASE_OPTS -Djruby.home=$JRUBY_HOME -Djruby.lib=$JRUBY_HOME/lib"
+
+  else  # JRUBY_HOME is not specified explicitly
+    if ! $in_dev_env; then  # not in dev environment
+      # add jruby packaged with HBase to CLASSPATH
+      JRUBY_PACKAGED_WITH_HBASE="$HBASE_HOME/lib/ruby/*.jar"
+      for jruby_jar in $JRUBY_PACKAGED_WITH_HBASE; do
+        CLASSPATH=$jruby_jar:$CLASSPATH;
+      done
+    fi
+  fi
+fi
+
+# figure out which class to run
+if [ "$COMMAND" = "shell" ] ; then
+	#find the hbase ruby sources
+  if [ -d "$HBASE_HOME/lib/ruby" ]; then
+    HBASE_OPTS="$HBASE_OPTS -Dhbase.ruby.sources=$HBASE_HOME/lib/ruby"
+  else
+    HBASE_OPTS="$HBASE_OPTS -Dhbase.ruby.sources=$HBASE_HOME/hbase-shell/src/main/ruby"
+  fi
+  HBASE_OPTS="$HBASE_OPTS $HBASE_SHELL_OPTS"
+  CLASS="org.jruby.Main -X+O ${JRUBY_OPTS} ${HBASE_HOME}/bin/hirb.rb"
+else
+  echo "command no support!"
+fi
+
+# Have JVM dump heap if we run out of memory.  Files will be 'launch directory'
+# and are named like the following: java_pid21612.hprof. Apparently it doesn't
+# 'cost' to have this flag enabled. Its a 1.6 flag only. See:
+# http://blogs.sun.com/alanb/entry/outofmemoryerror_looks_a_bit_better
+HBASE_OPTS="$HBASE_OPTS -Dhbase.log.dir=$HBASE_LOG_DIR"
+HBASE_OPTS="$HBASE_OPTS -Dhbase.log.file=$HBASE_LOGFILE"
+HBASE_OPTS="$HBASE_OPTS -Dhbase.home.dir=$HBASE_HOME"
+HBASE_OPTS="$HBASE_OPTS -Dhbase.id.str=$HBASE_IDENT_STRING"
+HBASE_OPTS="$HBASE_OPTS -Dhbase.root.logger=${HBASE_ROOT_LOGGER:-INFO,console}"
+if [ "x$JAVA_LIBRARY_PATH" != "x" ]; then
+  HBASE_OPTS="$HBASE_OPTS -Djava.library.path=$JAVA_LIBRARY_PATH"
+  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$JAVA_LIBRARY_PATH"
+fi
+
+
+HEAP_SETTINGS="$JAVA_HEAP_MAX $JAVA_OFFHEAP_MAX"
+# Exec unless HBASE_NOEXEC is set.
+export CLASSPATH
+
+if [ "${HBASE_NOEXEC}" != "" ]; then
+  "$JAVA" -Dproc_$COMMAND -XX:OnOutOfMemoryError="kill -9 %p" $HEAP_SETTINGS $HBASE_OPTS $CLASS "$@"
+else
+  exec "$JAVA" -Dproc_$COMMAND -XX:OnOutOfMemoryError="kill -9 %p" $HEAP_SETTINGS $HBASE_OPTS $CLASS "$@"
+fi
