@@ -1,4 +1,4 @@
-# Hbase Shell Stand-alone
+# HBase Shell Stand-alone
 
 HBase Shell 独立客户端，基于 [HBase-2.0.3](https://archive.apache.org/dist/hbase/2.0.3/) 标准二进制包裁剪的 hbase shell 客户端，仅保留 hbase shell 功能，用于内网远程登录 HBase；
 
